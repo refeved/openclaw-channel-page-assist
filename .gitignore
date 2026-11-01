@@ -3,3 +3,8 @@ dist/
 *.tsbuildinfo
 npm-debug.log*
 .openclaw-dev/
+
+# Redirect targets for detached hosts during manual gateway smoke tests.
+gateway*.txt
+global-*.txt
+install-*.txt
