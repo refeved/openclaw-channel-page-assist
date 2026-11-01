@@ -1,0 +1,15 @@
+{
+  "id": "page-assist",
+  "name": "Page Assist",
+  "description": "Page Assist browser channel: one loopback HTTP endpoint that drives a single OpenClaw agent.",
+  "categories": ["channels"],
+  "activation": {
+    "onStartup": true
+  },
+  "channels": ["page-assist"],
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  }
+}

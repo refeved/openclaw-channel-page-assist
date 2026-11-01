@@ -1,0 +1,91 @@
+{
+  "name": "@refeved/openclaw-channel-page-assist",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Page Assist browser channel plugin for the OpenClaw Gateway",
+  "type": "module",
+  "license": "MIT",
+  "main": "./dist/index.js",
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "files": [
+    "dist",
+    "openclaw.plugin.json",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "prepack": "npm run clean && npm run build",
+    "test": "node --test \"test/**/*.test.ts\""
+  },
+  "dependencies": {
+    "zod": "4.6.5"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.1",
+    "openclaw": "2026.10.9",
+    "typescript": "^5.9.3"
+  },
+  "peerDependencies": {
+    "openclaw": ">=2026.10.9"
+  },
+  "peerDependenciesMeta": {
+    "openclaw": {
+      "optional": true
+    }
+  },
+  "openclaw": {
+    "extensions": [
+      "./dist/index.js"
+    ],
+    "setupEntry": "./dist/setup-entry.js",
+    "compat": {
+      "pluginApi": ">=2026.10.9",
+      "minGatewayVersion": "2026.10.9"
+    },
+    "build": {
+      "openclawVersion": "2026.10.9",
+      "pluginSdkVersion": "2026.10.9"
+    },
+    "channel": {
+      "id": "page-assist",
+      "label": "Page Assist",
+      "selectionLabel": "Page Assist (browser sidebar)",
+      "detailLabel": "Page Assist",
+      "blurb": "Drive one OpenClaw agent from the Page Assist browser sidebar over a local HTTP endpoint.",
+      "systemImage": "safari",
+      "setup": {
+        "fields": [
+          {
+            "key": "browserToken",
+            "kind": "string",
+            "sensitive": true,
+            "cli": {
+              "flags": "--browser-token <token>",
+              "description": "Shared bearer token the browser extension presents"
+            }
+          },
+          {
+            "key": "agentId",
+            "kind": "string",
+            "cli": {
+              "flags": "--agent-id <id>",
+              "description": "OpenClaw agent this endpoint is bound to"
+            }
+          },
+          {
+            "key": "httpPort",
+            "kind": "integer",
+            "cli": {
+              "flags": "--http-port <port>",
+              "description": "Loopback port for the Page Assist endpoint"
+            }
+          }
+        ]
+      }
+    }
+  }
+}
