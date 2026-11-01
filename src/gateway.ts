@@ -6,6 +6,7 @@ import { channelReadyPatch, channelStoppedPatch } from "openclaw/plugin-sdk/gate
 import { normalizeOptionalString } from "openclaw/plugin-sdk/string-coerce-runtime";
 import { startPageAssistEndpoint } from "./http/server.js";
 import type { PageAssistScope } from "./http/scope.js";
+import { tryGetPageAssistRuntime } from "./runtime.js";
 import type { ResolvedPageAssistAccount } from "./types.js";
 
 type PageAssistGatewayContext = ChannelGatewayContext<ResolvedPageAssistAccount>;
@@ -32,6 +33,19 @@ const runningEndpoints = new Map<string, RunningEndpoint>();
  */
 export function resolvePageAssistAgentName(cfg: OpenClawConfig, agentId: string): string {
   return normalizeOptionalString(resolveAgentIdentity(cfg, agentId)?.name) ?? agentId;
+}
+
+/**
+ * The config the Gateway is running right now, or `undefined` when no runtime surface
+ * is reachable. The host hands out a read-only snapshot; the identity resolvers only
+ * read from it, so the type is relaxed at this single boundary.
+ */
+function currentPageAssistConfig(): OpenClawConfig | undefined {
+  try {
+    return tryGetPageAssistRuntime()?.config.current() as OpenClawConfig | undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /** Tears the endpoint down for one account. Safe to call more than once. */
@@ -76,11 +90,17 @@ export async function startPageAssistGatewayAccount(ctx: PageAssistGatewayContex
 
   if (!runningEndpoints.has(accountId)) {
     let stopping = false;
+    const startupAgentName = resolvePageAssistAgentName(ctx.cfg, account.agentId);
     const scope: PageAssistScope = {
       account,
       instanceId: randomUUID(),
       principalScope: account.principalScope,
-      agentName: resolvePageAssistAgentName(ctx.cfg, account.agentId),
+      // Renaming the agent is a config edit that does not restart this endpoint, so
+      // `/agents` reads the live config and keeps the start-time name only as a fallback.
+      resolveAgentName: () => {
+        const cfg = currentPageAssistConfig();
+        return cfg ? resolvePageAssistAgentName(cfg, account.agentId) : startupAgentName;
+      },
       log: ctx.log,
       isStopping: () => stopping,
     };

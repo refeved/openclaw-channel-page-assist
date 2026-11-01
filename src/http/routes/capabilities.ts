@@ -1,4 +1,6 @@
-import { OPENCLAW_VERSION } from "openclaw/plugin-sdk/agent-harness-registration";
+// The published package ships OPENCLAW_VERSION on two re-export paths; only this one
+// carries a .d.ts, so the host version stays type-checked instead of locally declared.
+import { OPENCLAW_VERSION } from "openclaw/plugin-sdk/agent-harness-runtime";
 import { getPageAssistPluginVersion } from "../../runtime.js";
 import { HTTP_PREFIX, buildCapabilities } from "../../protocol.js";
 import { sendJson } from "../respond.js";

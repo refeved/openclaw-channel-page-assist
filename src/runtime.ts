@@ -6,7 +6,11 @@ import type { PluginRuntime } from "openclaw/plugin-sdk/runtime-store";
  * for inbound dispatch, session binding, and media, and it is only reachable before
  * `startAccount`, so it is captured once here.
  */
-const { setRuntime: setPageAssistRuntime, getRuntime: getPageAssistRuntime } =
+const {
+  setRuntime: setPageAssistRuntime,
+  tryGetRuntime: tryGetPageAssistRuntime,
+  getRuntime: getPageAssistRuntime,
+} =
   createPluginRuntimeStore<PluginRuntime>({
     pluginId: "page-assist",
     errorMessage: "Page Assist runtime not initialized",
@@ -30,4 +34,4 @@ export function getPageAssistPluginVersion(): string | undefined {
   return pluginVersion;
 }
 
-export { getPageAssistRuntime, setPageAssistRuntime };
+export { getPageAssistRuntime, setPageAssistRuntime, tryGetPageAssistRuntime };

@@ -6,18 +6,18 @@ import type { ResolvedPageAssistAccount } from "../types.js";
 export type PageAssistLog = NonNullable<ChannelGatewayContext["log"]>;
 
 /**
- * Everything an endpoint needs that is not per-request state. Built once per
- * account start, so a route handler never re-reads config mid-request and a
- * config change can only reach the browser through an account restart.
+ * Everything an endpoint needs that is not per-request state. Built once per account
+ * start, so routes never re-read account config mid-request; values the host can change
+ * underneath a running endpoint are read through a resolver instead of copied.
  */
 export type PageAssistScope = {
   account: ResolvedPageAssistAccount;
-  /** `channels.page-assist.name` or the agent id; used for status output. */
+  /** Random id for this endpoint run, so the browser can tell a restart from a reconnect. */
   instanceId: string;
   /** sha256 of the browser token; the owner of every conversation and request. */
   principalScope: string;
-  /** Display name advertised on `/agents`, resolved once at startup. */
-  agentName: string;
+  /** Display name advertised on `/agents`, read from the live config on each call. */
+  resolveAgentName: () => string;
   log?: PageAssistLog;
   /** Flipped on stop so in-flight drains report 503 instead of accepting new work. */
   isStopping: () => boolean;

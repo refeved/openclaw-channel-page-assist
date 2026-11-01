@@ -14,7 +14,7 @@ export const pageAssistAgentsRoute: PageAssistRoute = {
   path: `${HTTP_PREFIX}/agents`,
   handler: ({ res, scope }) => {
     sendJson(res, 200, {
-      agents: [{ id: scope.account.agentId, name: scope.agentName }],
+      agents: [{ id: scope.account.agentId, name: scope.resolveAgentName() }],
     });
   },
 };

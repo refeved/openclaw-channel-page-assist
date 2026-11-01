@@ -2,14 +2,99 @@
   "id": "page-assist",
   "name": "Page Assist",
   "description": "Page Assist browser channel: one loopback HTTP endpoint that drives a single OpenClaw agent.",
-  "categories": ["channels"],
+  "categories": [
+    "channels"
+  ],
   "activation": {
     "onStartup": true
   },
-  "channels": ["page-assist"],
+  "channels": [
+    "page-assist"
+  ],
   "configSchema": {
     "type": "object",
     "additionalProperties": false,
     "properties": {}
+  },
+  "channelConfigs": {
+    "page-assist": {
+      "label": "Page Assist",
+      "description": "Page Assist browser sidebar endpoint.",
+      "schema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
+          "name": {
+            "type": "string"
+          },
+          "browserToken": {
+            "type": "string"
+          },
+          "agentId": {
+            "type": "string"
+          },
+          "httpHost": {
+            "type": "string",
+            "minLength": 1
+          },
+          "httpPort": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 65535
+          },
+          "mediaMaxMb": {
+            "type": "number",
+            "exclusiveMinimum": 0
+          },
+          "allowFrom": {
+            "type": "array",
+            "items": {
+              "type": [
+                "string",
+                "number"
+              ]
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "uiHints": {
+        "enabled": {
+          "label": "Enabled"
+        },
+        "name": {
+          "label": "Display name"
+        },
+        "browserToken": {
+          "label": "Browser token",
+          "sensitive": true,
+          "help": "Shared secret the sidebar sends as Authorization: Bearer <token>. At least 32 ASCII characters.",
+          "placeholder": "paste the token from the extension settings"
+        },
+        "agentId": {
+          "label": "Agent id",
+          "help": "Agent this endpoint drives. Defaults to the Gateway's default agent."
+        },
+        "httpHost": {
+          "label": "Bind address",
+          "advanced": true
+        },
+        "httpPort": {
+          "label": "Port",
+          "advanced": true
+        },
+        "mediaMaxMb": {
+          "label": "Max media size (MB)",
+          "advanced": true
+        },
+        "allowFrom": {
+          "label": "Allow from",
+          "advanced": true
+        }
+      }
+    }
   }
 }

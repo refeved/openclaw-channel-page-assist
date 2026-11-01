@@ -12,6 +12,11 @@ in-browser approvals land in the following phases; until they do, the
 corresponding capability switches stay `false` so the browser disables those
 controls instead of hanging on a reply that cannot arrive.
 
+Everything above `Status` has been exercised against a real Gateway
+(OpenClaw 2026.10.9): plugin load, `channels status`, both readable endpoints,
+the 401/404/405 responses, and a config hot reload that stops and restarts the
+endpoint on the same port.
+
 ## What the endpoint is
 
 | | |
@@ -71,6 +76,11 @@ the Gateway's default agent; `name` labels the account in status output;
 Then in the browser extension choose **Remote agent** and enter
 `http://127.0.0.1:8767/api/page-assist` with the same token.
 
+`GET /agents` reports the display name from `agents.*.identity.name`, falling
+back to the agent id. It is resolved from the live config on every request,
+because renaming an agent is a config edit that does not have to restart the
+endpoint.
+
 ## Endpoint coverage
 
 | Endpoint | State |
@@ -85,9 +95,17 @@ Then in the browser extension choose **Remote agent** and enter
 ## Development
 
 ```bash
-npm test        # contract tests, no Gateway needed
+npm test           # contract tests, no Gateway needed
 npm run typecheck
+npm run sync:manifest   # regenerate manifest channelConfigs from the zod schema
 ```
 
 `src/protocol.ts` holds the shared wire contract and stays free of SDK imports so
 the browser-visible field set and limits can be asserted without a host present.
+
+`openclaw.plugin.json` carries a `channelConfigs.page-assist` block that the host
+reads *before* the plugin runtime loads, to validate `channels.page-assist` and to
+build the setup wizard. Writing that JSON Schema by hand would let it drift from
+the zod schema the runtime actually enforces, so `npm run sync:manifest` generates
+it and `test/manifest.test.ts` fails if the two disagree. The script rewrites the
+whole manifest, so its JSON formatting is whatever `JSON.stringify` produces.

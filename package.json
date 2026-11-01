@@ -18,6 +18,7 @@
     "build": "tsc -p tsconfig.json",
     "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
     "typecheck": "tsc -p tsconfig.json --noEmit",
+    "sync:manifest": "node scripts/sync-manifest-channel-config.mjs",
     "prepack": "npm run clean && npm run build",
     "test": "node --test \"test/**/*.test.ts\""
   },
@@ -55,6 +56,7 @@
       "label": "Page Assist",
       "selectionLabel": "Page Assist (browser sidebar)",
       "detailLabel": "Page Assist",
+      "docsPath": "/channels/page-assist",
       "blurb": "Drive one OpenClaw agent from the Page Assist browser sidebar over a local HTTP endpoint.",
       "systemImage": "safari",
       "setup": {

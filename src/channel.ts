@@ -21,9 +21,13 @@ import type { CoreConfig, ResolvedPageAssistAccount } from "./types.js";
 export const pageAssistRuntimeMeta = {
   id: PAGE_ASSIST_CHANNEL_ID,
   label: "Page Assist",
-  selectionLabel: "Page Assist",
+  selectionLabel: "Page Assist (browser sidebar)",
   detailLabel: "Page Assist",
-  blurb: "Browser sidebar channel: one loopback endpoint driving one agent.",
+  // The host renders this as https://docs.openclaw.ai/channels/page-assist, which is
+  // where a third-party channel is expected to publish its setup notes.
+  docsPath: "/channels/page-assist",
+  systemImage: "safari",
+  blurb: "Drive one OpenClaw agent from the Page Assist browser sidebar over a local HTTP endpoint.",
 };
 
 /**
