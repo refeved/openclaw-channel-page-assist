@@ -5,17 +5,22 @@ browser sidebar talk to one OpenClaw agent over a local, authenticated HTTP
 endpoint — the same wire contract the QwenPaw channel serves, so the extension
 needs no host-specific branch.
 
-**Status: bring-up (P0).** The plugin loads, the channel appears in
-`openclaw channels status`, and the endpoint answers `GET /capabilities` and
-`GET /agents`. Message submission, streaming, attachments, reply media, and
+**Status: bring-up (P1).** The plugin loads, the channel appears in
+`openclaw channels status`, and the chat loop is closed: creating a
+conversation, submitting a message, reading history, polling a request, and
+streaming its events all reach a real agent run. Attachments, reply media, and
 in-browser approvals land in the following phases; until they do, the
 corresponding capability switches stay `false` so the browser disables those
 controls instead of hanging on a reply that cannot arrive.
 
 Everything above `Status` has been exercised against a real Gateway
-(OpenClaw 2026.10.9): plugin load, `channels status`, both readable endpoints,
-the 401/404/405 responses, and a config hot reload that stops and restarts the
-endpoint on the same port.
+(OpenClaw 2026.10.9) with a stub OpenAI-compatible provider: plugin load,
+`channels status`, every live endpoint below, the 401/404/405 responses, a
+config hot reload that stops and restarts the endpoint on the same port, a turn
+that carries the page context into the model and settles `completed`, one agent
+session per browser conversation, and an explicit channel stop that settles an
+in-flight request `cancelled` while its open stream still receives the terminal
+frame.
 
 ## What the endpoint is
 
@@ -81,14 +86,44 @@ back to the agent id. It is resolved from the live config on every request,
 because renaming an agent is a config edit that does not have to restart the
 endpoint.
 
+## How a turn runs
+
+`POST /conversations/{id}/messages` answers `202` as soon as the request is
+recorded, then runs the agent turn behind the response. The turn has to be
+started through `runDetachedWebhookWork`: a plain detached promise inherits the
+HTTP request's Gateway work admission, and that admission is released once the
+`202` is written, so the session work inside the turn would be refused as if
+the Gateway were restarting.
+
+One browser conversation is one agent session. The turn routes through
+`dmScope: "per-channel-peer"`, which gives
+`agent:<agentId>:page-assist:direct:<conversationId>`, so a chat's history
+stays inside that chat; an operator binding can still override the scope,
+because bindings win over the plugin's argument. Replies are appended to the
+transcript the browser polls, so the channel has no outbound transport and
+advertises no durable delivery.
+
+The browser can follow the turn with `GET /requests/{id}/events`. Frames are
+`request.state`, then `message.snapshot` per reply, then `request.terminal`, and
+the server ends the stream itself. Subscribe after submitting: an unknown
+request id answers `404` in this instance, which is how a restarted endpoint
+tells the browser that its history is gone.
+
+A stop settles everything in flight as `cancelled`, aborts the agent run, and
+closes open streams. A config hot reload does not: the host defers a channel
+reload until active Gateway work drains, so a running turn finishes before the
+restart lands. `channels.stop` is the path that retires the account under a
+running turn.
+
 ## Endpoint coverage
 
 | Endpoint | State |
 | --- | --- |
 | `GET /capabilities` | live |
 | `GET /agents` | live |
-| `POST /conversations`, `POST /conversations/{id}/messages` | pending (inbound dispatch) |
-| `GET /requests/{id}`, `GET /requests/{id}/events` (SSE) | pending (turn state + stream) |
+| `POST /conversations`, `POST /conversations/{id}/messages` | live |
+| `GET /conversations/{id}/messages` | live |
+| `GET /requests/{id}`, `GET /requests/{id}/events` (SSE) | live |
 | `GET /approvals`, `POST /approvals/{id}/decision` | pending (host approval registry + native resolve) |
 | `POST /attachments`, `GET /media/{id}` | pending (inbound files, reply media) |
 

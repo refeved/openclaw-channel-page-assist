@@ -20,6 +20,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "sync:manifest": "node scripts/sync-manifest-channel-config.mjs",
     "prepack": "npm run clean && npm run build",
+    "pretest": "npm run build",
     "test": "node --test \"test/**/*.test.ts\""
   },
   "dependencies": {

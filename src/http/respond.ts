@@ -20,6 +20,9 @@ export const unauthorized = () => new HttpError(401, "Invalid Page Assist browse
 export const forbidden = (message: string) => new HttpError(403, message);
 export const notFound = (message = "Unknown Page Assist request") => new HttpError(404, message);
 export const methodNotAllowed = () => new HttpError(405, "Unsupported Page Assist method");
+/** Body is not JSON or does not match the published payload shape; the browser only ever sees this one sentence. */
+export const badRequest = (message = "Invalid browser request payload") =>
+  new HttpError(400, message);
 export const conflict = (message: string) => new HttpError(409, message);
 export const payloadTooLarge = (message: string) => new HttpError(413, message);
 export const tooManyRequests = (message: string) => new HttpError(429, message);

@@ -1,6 +1,7 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { ChannelGatewayContext } from "openclaw/plugin-sdk/channel-contract";
 import type { ResolvedPageAssistAccount } from "../types.js";
+import type { PageAssistStore } from "../store.js";
 
 /** Log sink handed to us by the Gateway; kept optional so routes never depend on it. */
 export type PageAssistLog = NonNullable<ChannelGatewayContext["log"]>;
@@ -18,6 +19,8 @@ export type PageAssistScope = {
   principalScope: string;
   /** Display name advertised on `/agents`, read from the live config on each call. */
   resolveAgentName: () => string;
+  /** Conversations and requests owned by this endpoint run; dies with the listener. */
+  store: PageAssistStore;
   log?: PageAssistLog;
   /** Flipped on stop so in-flight drains report 503 instead of accepting new work. */
   isStopping: () => boolean;

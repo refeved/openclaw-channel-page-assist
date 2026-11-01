@@ -7,6 +7,7 @@ import { normalizeOptionalString } from "openclaw/plugin-sdk/string-coerce-runti
 import { startPageAssistEndpoint } from "./http/server.js";
 import type { PageAssistScope } from "./http/scope.js";
 import { tryGetPageAssistRuntime } from "./runtime.js";
+import { PageAssistStore } from "./store.js";
 import type { ResolvedPageAssistAccount } from "./types.js";
 
 type PageAssistGatewayContext = ChannelGatewayContext<ResolvedPageAssistAccount>;
@@ -90,6 +91,7 @@ export async function startPageAssistGatewayAccount(ctx: PageAssistGatewayContex
 
   if (!runningEndpoints.has(accountId)) {
     let stopping = false;
+    const store = new PageAssistStore();
     const startupAgentName = resolvePageAssistAgentName(ctx.cfg, account.agentId);
     const scope: PageAssistScope = {
       account,
@@ -101,6 +103,9 @@ export async function startPageAssistGatewayAccount(ctx: PageAssistGatewayContex
         const cfg = currentPageAssistConfig();
         return cfg ? resolvePageAssistAgentName(cfg, account.agentId) : startupAgentName;
       },
+      // Conversations live as long as the listener: the browser is told as much by
+      // `recovery: false`, and a reload therefore starts a fresh instance id.
+      store,
       log: ctx.log,
       isStopping: () => stopping,
     };
@@ -136,6 +141,9 @@ export async function startPageAssistGatewayAccount(ctx: PageAssistGatewayContex
       unregister,
       beginStopping: () => {
         stopping = true;
+        // Anything still running has no listener left to answer it: cut the agent
+        // run, mark the request cancelled, and let open event streams close.
+        store.beginStop();
         notifyStopped?.();
       },
     });
