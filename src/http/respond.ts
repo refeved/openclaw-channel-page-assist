@@ -52,6 +52,23 @@ export function sendText(res: ServerResponse, status: number, text: string): voi
   res.end(text);
 }
 
+/**
+ * Staged media bytes.
+ *
+ * Body is buffered rather than streamed because it already sits in the media store
+ * under a per-file ceiling, and a route that has to answer 404 for a file that vanished
+ * mid-read can do that cleanly only before the first byte is on the wire.
+ */
+export function sendBinary(
+  res: ServerResponse,
+  status: number,
+  body: Buffer,
+  headers: Record<string, string>,
+): void {
+  writeHead(res, status, { "Content-Length": String(body.byteLength), ...headers });
+  res.end(body);
+}
+
 export function sendStatus(res: ServerResponse, error: HttpError): void {
   sendText(res, error.status, error.message);
 }

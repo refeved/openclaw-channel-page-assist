@@ -1,11 +1,13 @@
 import type { PageAssistRoute } from "../scope.js";
 import { pageAssistAgentsRoute } from "./agents.js";
+import { pageAssistUploadAttachmentRoute } from "./attachments.js";
 import { pageAssistCapabilitiesRoute } from "./capabilities.js";
 import {
   pageAssistCreateConversationRoute,
   pageAssistHistoryRoute,
   pageAssistSubmitMessageRoute,
 } from "./conversations.js";
+import { pageAssistMediaRoute } from "./media.js";
 import { pageAssistEventsRoute, pageAssistRequestRoute } from "./requests.js";
 
 /**
@@ -19,6 +21,8 @@ export const pageAssistRoutes: readonly PageAssistRoute[] = [
   pageAssistCreateConversationRoute,
   pageAssistSubmitMessageRoute,
   pageAssistHistoryRoute,
+  pageAssistUploadAttachmentRoute,
+  pageAssistMediaRoute,
   pageAssistRequestRoute,
   pageAssistEventsRoute,
 ];

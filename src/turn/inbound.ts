@@ -8,12 +8,20 @@
  * the conversation the browser is polling.
  */
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
-import { readAgentRunTerminalOutcome } from "openclaw/plugin-sdk/channel-inbound";
+import {
+  readAgentRunTerminalOutcome,
+  toInboundMediaFacts,
+} from "openclaw/plugin-sdk/channel-inbound";
 import { PAGE_ASSIST_CHANNEL_ID } from "../accounts.js";
 import type { PageAssistScope } from "../http/scope.js";
-import { buildAgentText, type RequestState } from "../protocol.js";
+import {
+  buildAgentText,
+  buildAssistantReplyBody,
+  type RequestState,
+} from "../protocol.js";
 import { tryGetPageAssistRuntime } from "../runtime.js";
 import type { PageAssistRequest } from "../store.js";
+import { buildReplyMedia } from "./outbound.js";
 
 /** Event payload handed to the host pipeline; `raw` stays plugin-owned. */
 type PageAssistInboundEvent = {
@@ -146,6 +154,23 @@ export async function runPageAssistRequest(
       label: buildConversationLabel(record.payload.text),
     };
 
+    /**
+     * Uploads this request consumed, expressed the way the host reads them.
+     *
+     * The bytes already sit in the inbound media bucket, so the agent is given a store
+     * reference rather than an absolute server path. `file` is the browser's label and not
+     * a media family, so its kind is left for the host to classify from the type it
+     * detected while staging; only a magic-byte-proven image claims `image`.
+     */
+    const media = toInboundMediaFacts(
+      record.attachments.map((attachment) => ({
+        url: `media://inbound/${attachment.storeId}`,
+        contentType: attachment.mediaType,
+        fileName: attachment.name,
+        ...(attachment.kind === "image" ? { kind: "image" as const } : {}),
+      })),
+    );
+
     const ingress = await runtime.channel.inbound.ingress.resolveStable({
       channelId: PAGE_ASSIST_CHANNEL_ID,
       accountId: account.accountId,
@@ -210,6 +235,9 @@ export async function runPageAssistRequest(
               dispatchSessionKey: sessionKey,
             },
             reply: { to: `${PAGE_ASSIST_CHANNEL_ID}:${event.conversationId}` },
+            // A text-only turn keeps the same context it did before uploads existed:
+            // an empty media list is a different fact, not the same one.
+            ...(media.length > 0 ? { media } : {}),
             message: {
               inboundEventKind: "user_request",
               rawBody: input.rawText,
@@ -230,16 +258,25 @@ export async function runPageAssistRequest(
                * routes durable payloads through its own message-send owner, which
                * needs an outbound adapter this channel does not have.
                *
-               * Media is not consumed yet: `/capabilities` advertises `media: false`
-               * until the media phase lands, so a payload without text is reported as
-               * not delivered instead of silently dropping the attachment.
+               * Attachments are resolved before the row is written, so the media list and
+               * the text the browser reads describe the same reply. A payload that carries
+               * neither — a reasoning marker, an empty status line — is reported as not
+               * delivered rather than appended as a blank row.
                */
               deliver: async (payload) => {
                 const text = payload.text?.trim() ?? "";
-                if (!text) {
+                const { attachments, notices } = await buildReplyMedia({
+                  payload,
+                  store: scope.store,
+                  cfg,
+                  agentId: route.agentId,
+                  mediaMaxBytes: scope.account.mediaMaxBytes,
+                });
+                const body = buildAssistantReplyBody(text, notices);
+                if (!body && attachments.length === 0) {
                   return { visibleReplySent: false };
                 }
-                const appended = scope.store.appendAssistant(record, text);
+                const appended = scope.store.appendAssistant(record, body, attachments);
                 return { visibleReplySent: appended !== undefined };
               },
             },

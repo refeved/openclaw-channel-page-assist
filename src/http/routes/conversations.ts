@@ -1,9 +1,10 @@
 import { runDetachedWebhookWork } from "openclaw/plugin-sdk/webhook-request-guards";
+import { isStagedMediaPresent } from "../../media.js";
 import { HTTP_PREFIX, parseMessagePayload, parseNewConversation } from "../../protocol.js";
 import { runPageAssistRequest } from "../../turn/inbound.js";
 import { buildRequestDto } from "../../store.js";
 import { readBrowserBody } from "../body.js";
-import { badRequest, sendJson } from "../respond.js";
+import { sendJson } from "../respond.js";
 import type { PageAssistRoute } from "../scope.js";
 
 /**
@@ -39,15 +40,13 @@ export const pageAssistSubmitMessageRoute: PageAssistRoute = {
   handler: async ({ req, res, params, scope }) => {
     const conversation = scope.store.requireConversation(params.id ?? "");
     const payload = await readBrowserBody(req, parseMessagePayload);
-    // Uploads belong to the attachment phase; `/capabilities` already reports
-    // `attachments: false`, so a client that sends one is out of sync with the
-    // endpoint it is talking to. This is the QwenPaw sentence for an unusable
-    // attachment id, which keeps one meaning for one message across hosts.
-    if (payload.attachments?.length) {
-      throw badRequest("Attachment unavailable; upload it again");
-    }
 
-    const { record, replay } = scope.store.submit(conversation, payload);
+    // The claim runs inside `submit`, after the replay and capacity checks, so a retry
+    // of a submission the browser could not read answers from the original request
+    // instead of consuming its uploads a second time.
+    const { record, replay } = scope.store.submit(conversation, payload, (messagePayload) =>
+      scope.store.claimAttachments(messagePayload, (attachment) => isStagedMediaPresent(attachment)),
+    );
     sendJson(res, replay ? 200 : 202, buildRequestDto(record));
     if (replay) {
       return;

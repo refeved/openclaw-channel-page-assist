@@ -24,8 +24,16 @@ export const pageAssistCapabilitiesRoute: PageAssistRoute = {
         instanceId: scope.instanceId,
         principalScope: scope.principalScope,
         approvals: false,
-        attachments: false,
-        media: false,
+        // Both flags belong to the same feature: the browser reads `attachments` for the
+        // upload control and `media` for every byte fetch, including the upload it just
+        // sent coming back from a restored history. One without the other is a composer
+        // that accepts a file it can never show, so they light together — as they do in
+        // the reference channel.
+        attachments: true,
+        media: true,
+        // Publishes the ceiling this endpoint actually enforces, so an operator who set a
+        // tighter `mediaMaxMb` never has a browser that planned for 5 MB.
+        mediaMaxBytes: scope.account.mediaMaxBytes,
         channelVersion: getPageAssistPluginVersion(),
         hostVersion: OPENCLAW_VERSION,
       }),

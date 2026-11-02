@@ -28,26 +28,107 @@ export const MAX_CONTEXT_CHARS = 30000;
 export const MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024;
 export const MAX_ATTACHMENTS = 4;
 
+/**
+ * Uploads pile up before the browser sends them, so the pending count is bounded
+ * separately from the per-message count above.
+ */
+export const PENDING_ATTACHMENTS_MAX = 32;
+
+/** Reply media goes the other way: the same per-file ceiling keeps the panel responsive. */
+export const MAX_OUTGOING_FILE_BYTES = 5 * 1024 * 1024;
+
+/** One reply must not fill the transcript with downloads. */
+export const MAX_OUTGOING_ATTACHMENTS = 4;
+
+/**
+ * Reply bytes are buffered on disk until the endpoint restarts, so the total is
+ * capped as well; the oldest entries are dropped first, exactly as the QwenPaw
+ * channel does.
+ */
+export const MAX_OUTGOING_TOTAL_BYTES = 64 * 1024 * 1024;
+
+/**
+ * The per-file ceiling this endpoint enforces once the operator has had a say.
+ *
+ * `mediaMaxMb` — on the channel section, or `agents.defaults.mediaMaxMb` — is how an
+ * OpenClaw operator states a media limit for the host's own pipeline, and the host already
+ * refuses a reply file above it before this endpoint ever sees the reference. Reading it
+ * here keeps the two in step rather than leaving a documented setting inert, but only
+ * downward: `/capabilities` publishes the contract number, and an endpoint that advertised
+ * 5 MB while accepting 20 MB would refuse an upload the browser was promised fits.
+ */
+export function resolveMediaCeiling(contractBytes: number, operatorBytes?: number): number {
+  if (operatorBytes === undefined || !Number.isFinite(operatorBytes) || operatorBytes < 1) {
+    return contractBytes;
+  }
+  return Math.min(contractBytes, Math.floor(operatorBytes));
+}
+
+/**
+ * The MB number a ceiling is announced as, floored like the reference channel's integer
+ * division and never below one, so a limit under a megabyte still names something a user
+ * can act on rather than "larger than 0 MB".
+ */
+export function mediaCeilingMegabytes(ceilingBytes: number): number {
+  return Math.max(1, Math.floor(ceilingBytes / (1024 * 1024)));
+}
+
 /** In-flight guards; exceeding either is a 429 rather than a queue. */
 export const MAX_CONVERSATIONS = 100;
 export const MAX_PENDING_REQUESTS = 500;
 
 /** Reply media the browser may render inline, mirrored from the QwenPaw channel. */
-export const INLINE_MEDIA_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
+export const INLINE_MEDIA_TYPES = new Set([
+  "image/png",
+  "image/jpeg",
+  "image/gif",
+  "image/webp",
+  "image/bmp",
+]);
 
 /** Page-context field ceilings the extension enforces before it sends. */
 export const MAX_CONTEXT_TITLE_CHARS = 2000;
 export const MAX_CONTEXT_URL_CHARS = 8000;
 
+/** Ceilings on the upload form itself, so one row cannot carry an unbounded label. */
+export const MAX_ATTACHMENT_NAME_CHARS = 255;
+export const MAX_MEDIA_TYPE_CHARS = 100;
+
+/** The sanitized name the browser displays, and the fallback when nothing survives. */
+export const MAX_ATTACHMENT_DISPLAY_NAME_CHARS = 120;
+export const FALLBACK_ATTACHMENT_NAME = "attachment";
+
 /** Chat history statuses; the browser only ever sees a completed message row. */
 export type MessageRole = "user" | "assistant";
+
+/**
+ * Attachment families the browser can render. The extension's own validator accepts
+ * exactly these two values and rejects a message row that carries anything else, so
+ * a host kind of `video`, `audio`, or `document` is reported as `file`: the download
+ * still works, and the transcript does not fall over on a kind it cannot show.
+ */
+export type AttachmentKind = "image" | "file";
+
+/**
+ * One readable attachment on a transcript row. Exactly one source is set: a stored
+ * `mediaId` served by `GET /media/:id`, or a public `url` the channel forwarded
+ * without fetching, which is why its `bytes` is 0.
+ */
+export type MessageAttachment = {
+  mediaId?: string;
+  url?: string;
+  kind: AttachmentKind;
+  name: string;
+  mediaType: string;
+  bytes: number;
+};
 
 export type ConversationMessage = {
   id: string;
   requestId: string;
   role: MessageRole;
   content: string;
-  attachments: unknown[];
+  attachments: MessageAttachment[];
   status: "complete";
 };
 
@@ -122,6 +203,12 @@ export type CapabilitiesInput = {
   media: boolean;
   channelVersion?: string;
   hostVersion?: string;
+  /**
+   * Operator media limit in bytes (`mediaMaxMb`), published through
+   * `resolveMediaCeiling`: it can lower `maxAttachmentBytes`, never raise it, so the
+   * number the browser plans around is the number this endpoint enforces.
+   */
+  mediaMaxBytes?: number;
 };
 
 /**
@@ -141,7 +228,7 @@ export function buildCapabilities(input: CapabilitiesInput): PageAssistCapabilit
     // polls `/approvals` instead, which is what the QwenPaw channel does too.
     approvalEvents: false,
     attachments: input.attachments,
-    maxAttachmentBytes: MAX_ATTACHMENT_BYTES,
+    maxAttachmentBytes: resolveMediaCeiling(MAX_ATTACHMENT_BYTES, input.mediaMaxBytes),
     maxAttachments: MAX_ATTACHMENTS,
     media: input.media,
   };
@@ -294,6 +381,11 @@ function requireUuid(value: string, key: string): string {
   return value;
 }
 
+/** Whether a path segment is the opaque UUID the contract promises for an id. */
+export function isUuid(value: string): boolean {
+  return UUID_PATTERN.test(value);
+}
+
 function parsePageContext(value: unknown): PageContext {
   const raw = asObject(value, "Webpage context");
   rejectExtraKeys(raw, [
@@ -429,4 +521,472 @@ export function buildAgentText(payload: MessagePayload): string {
     `Capture mode: ${context.mode}; truncated: ${context.truncated}\n` +
     `<webpage-reference>\n${context.content}\n</webpage-reference>`
   );
+}
+
+/* ------------------------------------------------------------------ *
+ * Uploads and transcript attachments                                  *
+ * ------------------------------------------------------------------ */
+
+/**
+ * Base64 with mandatory padding, which is what `btoa()` produces. Python's
+ * `validate=True` only rejects characters outside the alphabet, so this is the
+ * stricter of the two: a payload this endpoint refuses is a payload the extension
+ * never generates, and a payload it accepts decodes identically on both hosts.
+ *
+ * The shape is checked arithmetically instead of with one anchored pattern, because an
+ * attachment is megabytes of characters: V8 recurses per backtracking position inside a
+ * nested quantifier, so the equivalent `/^(?:[A-Za-z0-9+/]{4})*(?:…)?$/` dies with
+ * `RangeError: Maximum call stack size exceeded` on a body the contract invites. A single
+ * character class does not backtrack.
+ */
+const BASE64_ALPHABET_PATTERN = /^[A-Za-z0-9+/]*$/;
+
+function base64Padding(value: string): number {
+  return value.endsWith("==") ? 2 : value.endsWith("=") ? 1 : 0;
+}
+
+/** Whether a payload is canonical padded base64, the only form either host decodes. */
+export function isPaddedBase64(value: string): boolean {
+  // Groups of four: no padding, `[A-Za-z0-9+/]{3}=`, or `[A-Za-z0-9+/]{2}==`.
+  if (value.length % 4 !== 0) {
+    return false;
+  }
+  const padding = base64Padding(value);
+  return BASE64_ALPHABET_PATTERN.test(value.slice(0, value.length - padding));
+}
+
+/**
+ * The most bytes a base64 payload of this length can decode to: three per group of four
+ * characters, rounded up.
+ *
+ * Reply media reaches the channel as characters from a source the user did not review, and
+ * no request ceiling bounds its length, so the bound is tested before `Buffer.from`
+ * allocates — an oversized file is then refused for its size instead of for memory that
+ * never had to be reserved.
+ */
+export function base64DecodedUpperBound(data: string): number {
+  return Math.ceil(data.length / 4) * 3;
+}
+
+const MEDIA_TYPE_CONTROL_PATTERN = /[\u0000-\u001f]/;
+
+/**
+ * Magic bytes that prove an upload is an image. The declared type is a hint from the
+ * sender, so only these signatures may set `kind: "image"`, and a file that lies about
+ * its type is stored as the bytes say rather than handed to the agent as a picture.
+ */
+const IMAGE_MAGIC: ReadonlyArray<{ signature: Uint8Array; mediaType: string }> = [
+  { signature: new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), mediaType: "image/png" },
+  { signature: new Uint8Array([0xff, 0xd8, 0xff]), mediaType: "image/jpeg" },
+  { signature: new Uint8Array([0x47, 0x49, 0x46, 0x38, 0x37, 0x61]), mediaType: "image/gif" },
+  { signature: new Uint8Array([0x47, 0x49, 0x46, 0x38, 0x39, 0x61]), mediaType: "image/gif" },
+  { signature: new Uint8Array([0x42, 0x4d]), mediaType: "image/bmp" },
+];
+
+/** WebP is a container, so its signature is checked separately. */
+function isWebpBuffer(buffer: Uint8Array): boolean {
+  return (
+    buffer.length >= 12 &&
+    buffer[0] === 0x52 &&
+    buffer[1] === 0x49 &&
+    buffer[2] === 0x46 &&
+    buffer[3] === 0x46 &&
+    buffer[8] === 0x57 &&
+    buffer[9] === 0x45 &&
+    buffer[10] === 0x42 &&
+    buffer[11] === 0x50
+  );
+}
+
+/** Media type the bytes prove, or undefined when they are not a renderable image. */
+export function classifyImageMediaType(buffer: Uint8Array): string | undefined {
+  for (const { signature, mediaType } of IMAGE_MAGIC) {
+    if (startsWith(buffer, signature)) {
+      return mediaType;
+    }
+  }
+  return isWebpBuffer(buffer) ? "image/webp" : undefined;
+}
+
+function startsWith(buffer: Uint8Array, prefix: Uint8Array): boolean {
+  if (buffer.length < prefix.length) {
+    return false;
+  }
+  for (let index = 0; index < prefix.length; index += 1) {
+    if (buffer[index] !== prefix[index]) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * Keeps a displayable basename out of an attacker-controlled string. Directory parts,
+ * reserved characters and control bytes are dropped, and an all-dots name becomes the
+ * fallback rather than a path element. Wording and order are the QwenPaw channel's.
+ */
+export function sanitizeAttachmentName(name: string): string {
+  const base = name.replace(/\\/g, "/").split("/").pop() ?? "";
+  const cleaned = base
+    .replace(/[<>:"/\\|?*\u0000-\u001f]/g, "_")
+    .trim()
+    .replace(/^\.+|\.+$/g, "");
+  const characters = Array.from(cleaned);
+  return characters.slice(0, MAX_ATTACHMENT_DISPLAY_NAME_CHARS).join("") || FALLBACK_ATTACHMENT_NAME;
+}
+
+/**
+ * `POST /attachments` body, validated and decoded.
+ *
+ * The result is everything the route needs that is not a disk write: the decoded
+ * bytes, the name the browser will see, and the kind and type it will render.
+ * Every rejection is a `BrowserPayloadError`, which the route folds into the same
+ * plain 400 as any other malformed body — the specific sentence is a log line.
+ * `maxBytes` is the account's `mediaMaxMb`, and can only lower the contract ceiling.
+ */
+export type ParsedAttachmentUpload = {
+  buffer: Buffer;
+  name: string;
+  kind: AttachmentKind;
+  mediaType: string;
+  bytes: number;
+};
+
+export function parseAttachmentUpload(
+  value: unknown,
+  maxBytes?: number,
+): ParsedAttachmentUpload {
+  const raw = asObject(value, "Attachment upload");
+  rejectExtraKeys(raw, ["name", "mediaType", "data"]);
+
+  const requestedName = readString(raw, "name", true);
+  if (!requestedName.trim() || jsLength(requestedName) > MAX_ATTACHMENT_NAME_CHARS) {
+    fail("Attachment name is empty or too long");
+  }
+  const declaredType = readString(raw, "mediaType", true);
+  if (
+    codePointLength(declaredType) > MAX_MEDIA_TYPE_CHARS ||
+    MEDIA_TYPE_CONTROL_PATTERN.test(declaredType)
+  ) {
+    fail("Attachment media type is invalid");
+  }
+  const data = readString(raw, "data", true);
+  if (!isPaddedBase64(data)) {
+    fail("Attachment data is not base64");
+  }
+  const buffer = Buffer.from(data, "base64");
+  if (buffer.length === 0) {
+    fail("Attachment is empty");
+  }
+  // Same ceiling `/capabilities` publishes, so a body is never refused for a limit the
+  // browser was not told about.
+  const ceiling = resolveMediaCeiling(MAX_ATTACHMENT_BYTES, maxBytes);
+  if (buffer.length > ceiling) {
+    fail(`Attachment exceeds ${ceiling / (1024 * 1024)} MB`);
+  }
+
+  const imageType = classifyImageMediaType(buffer);
+  return {
+    buffer,
+    name: sanitizeAttachmentName(requestedName),
+    kind: imageType ? "image" : "file",
+    // The proven type wins, then whatever the sender declared, then a download.
+    mediaType: imageType || declaredType || "application/octet-stream",
+    bytes: buffer.length,
+  };
+}
+
+/**
+ * The user's transcript row. Media bytes live on disk, so the text carries one
+ * labelled note per attachment and the structured list carries the references the
+ * extension turns into previews and downloads. Sentences are verbatim QwenPaw.
+ */
+export function buildUserMessageText(
+  text: string,
+  attachments: readonly Pick<MessageAttachment, "kind" | "name">[],
+): string {
+  if (attachments.length === 0) {
+    return text;
+  }
+  const notes = attachments.map((entry) => `[attachment ${entry.kind}: ${entry.name}]`).join("\n");
+  return text.trim() ? `${text}\n${notes}` : notes;
+}
+
+/**
+ * Media references for the browser, next to the textual history line.
+ *
+ * A staged record is addressed internally by its own id, and the wire calls that field
+ * `mediaId` — the store id it points into stays behind it, so nothing on the row names a
+ * file on disk.
+ */
+export function buildUserMessageAttachments(
+  attachments: readonly (Pick<MessageAttachment, "kind" | "name" | "mediaType" | "bytes"> & {
+    id: string;
+  })[],
+): MessageAttachment[] {
+  return attachments.map((entry) => ({
+    mediaId: entry.id,
+    kind: entry.kind,
+    name: entry.name,
+    mediaType: entry.mediaType,
+    bytes: entry.bytes,
+  }));
+}
+
+/* ------------------------------------------------------------------ *
+ * Reply media                                                         *
+ * ------------------------------------------------------------------ */
+
+/**
+ * Types the reference channel guesses from a filename when nothing else proved one,
+ * kept verbatim so a `.xlsx` the Agent produced is offered as the same Content-Type the
+ * QwenPaw channel would send.
+ */
+const MEDIA_TYPE_BY_SUFFIX: ReadonlyMap<string, string> = new Map([
+  [".png", "image/png"],
+  [".jpg", "image/jpeg"],
+  [".jpeg", "image/jpeg"],
+  [".gif", "image/gif"],
+  [".webp", "image/webp"],
+  [".bmp", "image/bmp"],
+  [".svg", "image/svg+xml"],
+  [".pdf", "application/pdf"],
+  [".txt", "text/plain"],
+  [".md", "text/markdown"],
+  [".csv", "text/csv"],
+  [".json", "application/json"],
+  [".html", "text/html"],
+  [".doc", "application/msword"],
+  [".docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"],
+  [".xls", "application/vnd.ms-excel"],
+  [".xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"],
+  [".ppt", "application/vnd.ms-powerpoint"],
+  [".pptx", "application/vnd.openxmlformats-officedocument.presentationml.presentation"],
+  [".zip", "application/zip"],
+  [".mp3", "audio/mpeg"],
+  [".wav", "audio/wav"],
+  [".ogg", "audio/ogg"],
+  [".mp4", "video/mp4"],
+  [".webm", "video/webm"],
+]);
+
+const MEDIA_SUFFIX_PATTERN = /^\.[A-Za-z0-9]{1,8}$/;
+
+/**
+ * The file extension worth trusting as a type hint: the last dot in the basename, one to
+ * eight alphanumeric characters, lowercased. A dotfile has no extension, and `.照片` is
+ * not something a browser can route to a helper application.
+ */
+export function safeMediaSuffix(name: string): string {
+  const base = name.replace(/\\/g, "/").split("/").pop() ?? "";
+  const dot = base.lastIndexOf(".");
+  if (dot <= 0) {
+    return "";
+  }
+  const suffix = base.slice(dot);
+  return MEDIA_SUFFIX_PATTERN.test(suffix) ? suffix.toLowerCase() : "";
+}
+
+/**
+ * Content-Type the browser can render or hand to a downloader.
+ *
+ * Declared type first — unless it was the meaningless generic one — then the filename,
+ * then a plain image for a picture with no name to read, then a download. Same order and
+ * same values as the QwenPaw channel's `media_type_for`.
+ */
+export function resolveReplyMediaType(
+  kind: AttachmentKind,
+  name: string,
+  declaredType?: string,
+): string {
+  const declared = (declaredType ?? "").split(";")[0]?.trim().toLowerCase() ?? "";
+  if (declared && declared !== "application/octet-stream") {
+    return declared;
+  }
+  const guessed = MEDIA_TYPE_BY_SUFFIX.get(safeMediaSuffix(name));
+  if (guessed) {
+    return guessed;
+  }
+  return kind === "image" ? "image/png" : "application/octet-stream";
+}
+
+/**
+ * The browser renders a preview for `image` and a chip for `file`, and its validator
+ * rejects any other kind, so the host's finer families fold down here: a video or a
+ * document still arrives as a download, which is what the user can actually do with it.
+ * An undefined kind is left undefined for the caller to settle from the bytes.
+ */
+export function normalizeAttachmentKind(kind?: string): AttachmentKind | undefined {
+  if (kind === undefined) {
+    return undefined;
+  }
+  return kind === "image" ? "image" : "file";
+}
+
+/**
+ * Whether the panel previews a reference or downloads it, read out of its content type.
+ *
+ * The reference channel takes the kind from the media part the framework built. An
+ * OpenClaw reply carries no part — a `MEDIA:` line is a bare reference — so the resolved
+ * type stands in for that declaration, and only an image folds up to `image` the same way
+ * `normalizeAttachmentKind` folds the host's video and audio families down to a download.
+ */
+export function attachmentKindForMediaType(mediaType?: string): AttachmentKind {
+  return (mediaType ?? "").toLowerCase().startsWith("image/") ? "image" : "file";
+}
+
+/**
+ * A base64 data URL, in the reference channel's exact shape: an optional type, then
+ * `;base64,`, then the payload. Anything else that starts with `data:` — a URL-encoded
+ * body, a truncated fragment — is not forwarded, because the browser would receive bytes
+ * it has no way to name or render.
+ */
+const DATA_URL_PATTERN = /^data:([\w.+-]+\/[\w.+-]+)?;base64,([\s\S]*)$/i;
+
+const URL_SCHEME_PATTERN = /^([a-z][a-z0-9+.-]*):/i;
+
+/** A Windows path starts with a drive letter and a colon, which is not a URL scheme. */
+const WINDOWS_DRIVE_PATH_PATTERN = /^[a-z]:[\\/]/i;
+
+/**
+ * An `http(s)` reference whose authority is empty as written — `https:///a.png` — names no
+ * server: the URL parser rescues it by promoting the first path segment to a host, which is
+ * a machine nobody asked for. The reference channel requires a non-empty netloc, so the text
+ * is judged as written before the parser gets to be generous.
+ */
+const HTTP_AUTHORITY_PATTERN = /^https?:\/\/[^/?#\\]/i;
+
+/**
+ * Where one reply media reference points.
+ *
+ * `local` covers everything the host can read from disk: a `file:` URL, the media store's
+ * own `media://` reference, and a plain path. Which of those it is, and whether the path
+ * is inside a directory this Agent may read, is decided by the host loader rather than
+ * re-implemented here. `http` is forwarded to the browser without a server-side fetch,
+ * because fetching it here would turn a loopback endpoint into an open proxy.
+ */
+export type ReplyMediaSource =
+  | { source: "data"; mediaType?: string; data: string }
+  | { source: "http"; url: string }
+  | { source: "local"; reference: string }
+  | { source: "unsupported" };
+
+export function classifyReplyMediaSource(value: string): ReplyMediaSource {
+  const reference = value.trim();
+  if (/^data:/i.test(reference)) {
+    const match = DATA_URL_PATTERN.exec(reference);
+    if (!match) {
+      return { source: "unsupported" };
+    }
+    return { source: "data", mediaType: match[1], data: match[2] ?? "" };
+  }
+  const scheme = URL_SCHEME_PATTERN.exec(reference)?.[1]?.toLowerCase();
+  if (scheme === "http" || scheme === "https") {
+    if (!HTTP_AUTHORITY_PATTERN.test(reference)) {
+      return { source: "unsupported" };
+    }
+    let url: URL;
+    try {
+      url = new URL(reference);
+    } catch {
+      return { source: "unsupported" };
+    }
+    // A URL with no host is not a location the browser can reach.
+    return url.host ? { source: "http", url: reference } : { source: "unsupported" };
+  }
+  if (
+    scheme === undefined ||
+    scheme === "file" ||
+    scheme === "media" ||
+    WINDOWS_DRIVE_PATH_PATTERN.test(reference)
+  ) {
+    return { source: "local", reference };
+  }
+  return { source: "unsupported" };
+}
+
+/**
+ * Decodes a data URL's payload, or reports that it cannot be decoded.
+ *
+ * `Buffer.from(..., "base64")` skips characters outside the alphabet instead of rejecting
+ * them, so the padding-strict check is the validation here: what it refuses is shown as
+ * undecodable rather than delivered as a file whose bytes are quietly shorter. Size is not
+ * judged here — the caller bounds it before allocating.
+ */
+export function decodeBase64Media(data: string): Buffer | undefined {
+  if (!isPaddedBase64(data)) {
+    return undefined;
+  }
+  return Buffer.from(data, "base64");
+}
+
+/**
+ * The most readable basename available for media whose reference carries no name.
+ *
+ * The percent-decoded last path segment for a URL, the same segment of a plain path, and
+ * for a data URL an extension built from its own type. The result is not yet safe to
+ * show: the caller sanitizes it like every other name on the wire.
+ */
+export function suggestMediaName(source: ReplyMediaSource): string {
+  if (source.source === "data") {
+    const extension = source.mediaType?.split("/")[1]?.split("+")[0] ?? "";
+    return extension ? `image.${extension}` : "";
+  }
+  if (source.source === "unsupported") {
+    return "";
+  }
+  const reference = source.source === "http" ? source.url : source.reference;
+  let path = reference;
+  if (/^[a-z][a-z0-9+.-]*:/i.test(reference)) {
+    try {
+      path = new URL(reference).pathname;
+    } catch {
+      return "";
+    }
+  }
+  const tail = path.split(/[\\/]/).pop() ?? "";
+  try {
+    return decodeURIComponent(tail);
+  } catch {
+    return tail;
+  }
+}
+
+/**
+ * What the channel says when it drops one attachment.
+ *
+ * Sentences are the QwenPaw channel's verbatim, because the browser shows them to the
+ * user as the reply text: an attachment that cannot travel is reported in the transcript
+ * rather than lost in silence.
+ */
+export const REPLY_MEDIA_NOTICE = {
+  unsupportedFormat: (kind: AttachmentKind) =>
+    `[${kind}: this attachment format is not supported by the browser channel]`,
+  tooManyAttachments: (kind: AttachmentKind, name: string) =>
+    `[${kind}: ${name} skipped, more than ${MAX_OUTGOING_ATTACHMENTS} attachments]`,
+  undecoded: (kind: AttachmentKind, name: string) => `[${kind}: ${name} could not be decoded]`,
+  unavailable: (kind: AttachmentKind, name: string) => `[${kind}: ${name} is no longer available]`,
+  empty: "[Media is empty and was skipped.]",
+  /**
+   * The reference channel's sentence, sized to the ceiling that actually refused the file:
+   * the contract's 5 MB unless `mediaMaxMb` lowered it, in which case the MB number has to
+   * change with it or the transcript blames the wrong limit.
+   */
+  tooLarge: (name: string, limitMb: number) =>
+    `[Media '${name}' is larger than ${limitMb} MB and was skipped.]`,
+} as const;
+
+/**
+ * The assistant row's text: the reply, with any skipped-attachment notices under it.
+ *
+ * A reply that is nothing but notices still reaches the browser, which is the point of
+ * the sentence — the user asked for a file and has to be told it did not come.
+ */
+export function buildAssistantReplyBody(text: string, notices: readonly string[]): string {
+  const body = text.trim();
+  if (notices.length === 0) {
+    return body;
+  }
+  const noticeText = notices.join("\n");
+  return body ? `${body}\n${noticeText}` : noticeText;
 }

@@ -3,10 +3,12 @@ import { createHash } from "node:crypto";
 import { test } from "node:test";
 import {
   BrowserPayloadError,
+  MAX_ATTACHMENT_BYTES,
   MAX_CONTEXT_CHARS,
   MAX_TEXT_CHARS,
   buildAgentText,
   endsEventStream,
+  parseAttachmentUpload,
   parseMessagePayload,
   parseNewConversation,
   type RequestState,
@@ -199,5 +201,117 @@ test("the event stream ends on terminal states and on unknown", () => {
   assert.deepEqual(
     states.filter(endsEventStream),
     ["completed", "failed", "cancelled", "unknown"],
+  );
+});
+
+/** Bytes the QwenPaw channel's `IMAGE_MAGIC` proves, in the body form the extension sends. */
+function upload(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    name: "screenshot.png",
+    mediaType: "image/png",
+    data: Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00]).toString("base64"),
+    ...overrides,
+  };
+}
+
+test("an upload is classified by the bytes, not by what the sender declared", () => {
+  const png = parseAttachmentUpload(upload());
+  assert.equal(png.kind, "image");
+  assert.equal(png.mediaType, "image/png");
+  assert.equal(png.bytes, 9);
+  assert.equal(png.name, "screenshot.png");
+
+  // A declared type is a hint from the page, so a lie about the bytes loses.
+  assert.equal(
+    parseAttachmentUpload(upload({ mediaType: "application/pdf" })).mediaType,
+    "image/png",
+  );
+  assert.equal(parseAttachmentUpload(upload({ mediaType: "" })).kind, "image");
+
+  const variants: Array<[Uint8Array, string]> = [
+    [new Uint8Array([0xff, 0xd8, 0xff, 0x00]), "image/jpeg"],
+    [new Uint8Array([0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 0x00]), "image/gif"],
+    [new Uint8Array([0x42, 0x4d, 0x00, 0x00]), "image/bmp"],
+    // WebP is a container: RIFF, four unused bytes, then the WEBP tag.
+    [
+      new Uint8Array([
+        0x52, 0x49, 0x46, 0x46, 0x00, 0x00, 0x00, 0x00, 0x57, 0x45, 0x42, 0x50,
+      ]),
+      "image/webp",
+    ],
+  ];
+  for (const [magic, expected] of variants) {
+    const parsed = parseAttachmentUpload(
+      upload({ data: Buffer.from(magic).toString("base64"), mediaType: "application/octet-stream" }),
+    );
+    assert.equal(parsed.mediaType, expected);
+    assert.equal(parsed.kind, "image");
+  }
+
+  // Anything the magic bytes cannot prove stays a download, whatever the sender called it.
+  const pdf = parseAttachmentUpload(
+    upload({ name: "report.pdf", mediaType: "application/pdf", data: Buffer.from("%PDF-1.4").toString("base64") }),
+  );
+  assert.equal(pdf.kind, "file");
+  assert.equal(pdf.mediaType, "application/pdf");
+  assert.equal(
+    parseAttachmentUpload(upload({ name: "blob", mediaType: "", data: Buffer.from("x").toString("base64") }))
+      .mediaType,
+    "application/octet-stream",
+  );
+});
+
+test("an upload name becomes a display name and never a path", () => {
+  assert.equal(
+    parseAttachmentUpload(upload({ name: `..\\..\\secrets${"\u0000"}:app.txt` })).name,
+    "secrets__app.txt",
+  );
+  assert.equal(parseAttachmentUpload(upload({ name: "C:\\Windows\\system32\\config" })).name, "config");
+  assert.equal(parseAttachmentUpload(upload({ name: "...." })).name, "attachment");
+  assert.equal(Array.from(parseAttachmentUpload(upload({ name: "a".repeat(200) })).name).length, 120);
+});
+
+test("an upload body the extension cannot produce is refused", () => {
+  const sentences: Array<[Record<string, unknown>, RegExp]> = [
+    [{ name: "", mediaType: "image/png", data: "AAAA" }, /Attachment name is empty or too long/],
+    [{ name: "a".repeat(256), mediaType: "image/png", data: "AAAA" }, /Attachment name is empty or too long/],
+    [{ name: "x", mediaType: "image/png\u0001", data: "AAAA" }, /media type is invalid/],
+    [{ name: "x", mediaType: "m".repeat(101), data: "AAAA" }, /media type is invalid/],
+    [upload({ data: "not base64 !!!" }), /data is not base64/],
+    // Padding is mandatory here, as it is in the `btoa()` output the extension produces.
+    [upload({ data: "AAAAA" }), /data is not base64/],
+    [{ name: "x", mediaType: "image/png", data: "" }, /Attachment is empty/],
+    [upload({ extra: true }), /Unexpected field extra/],
+    [{ name: "x", mediaType: "image/png" }, /data is required/],
+  ];
+  for (const [body, expected] of sentences) {
+    assert.throws(() => parseAttachmentUpload(body), (error: unknown) => {
+      assert.ok(error instanceof BrowserPayloadError, `expected a payload error for ${JSON.stringify(body)}`);
+      assert.match(error.message, expected);
+      return true;
+    });
+  }
+});
+
+test("an upload over the advertised ceiling is refused before it is staged", () => {
+  const oversize = Buffer.alloc(MAX_ATTACHMENT_BYTES + 1, 0x41).toString("base64");
+  assert.throws(
+    () => parseAttachmentUpload(upload({ data: oversize })),
+    /Attachment exceeds 5 MB/,
+  );
+  // The ceiling the browser was told about is the one the parser applies.
+  const atLimit = Buffer.alloc(MAX_ATTACHMENT_BYTES, 0x41).toString("base64");
+  assert.equal(parseAttachmentUpload(upload({ data: atLimit })).bytes, MAX_ATTACHMENT_BYTES);
+
+  // A tighter mediaMaxMb lowers that ceiling, and the sentence quotes the lowered number so
+  // the log does not blame a limit the endpoint never advertised.
+  assert.throws(
+    () => parseAttachmentUpload(upload({ data: Buffer.alloc(2 * 1024 * 1024, 0x41).toString("base64") }), 1024 * 1024),
+    /Attachment exceeds 1 MB/,
+  );
+  // A looser one cannot lift the contract.
+  assert.equal(
+    parseAttachmentUpload(upload({ data: atLimit }), 50 * 1024 * 1024).bytes,
+    MAX_ATTACHMENT_BYTES,
   );
 });
