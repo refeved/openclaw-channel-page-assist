@@ -91,8 +91,10 @@ ceiling the contract publishes — it is applied to uploads, reply media and the
 `GET /media` read alike, and `/capabilities` advertises the lowered number so the
 browser never plans around a limit this endpoint does not enforce.
 
-Then in the browser extension choose **Remote agent** and enter
-`http://127.0.0.1:8767/api/page-assist` with the same token.
+Then in the browser extension choose **Remote agent** and enter the service
+origin `http://127.0.0.1:8767` with the same token. The extension appends the
+protocol prefix itself and refuses a saved URL that already carries a path, so
+the origin is the whole address.
 
 `GET /agents` reports the display name from `agents.*.identity.name`, falling
 back to the agent id. It is resolved from the live config on every request,
