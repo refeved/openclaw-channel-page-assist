@@ -19,8 +19,9 @@ const HEALTH_PATH = "/healthz";
  *
  * Two details are load-bearing:
  * - `legacyListener` is only accepted with `auth: "plugin"`, which also means the
- *   route gets no operator scopes. Everything the endpoints need must come from
- *   the channel runtime, never from a gateway method call.
+ *   route gets no operator scopes. Whatever the channel runtime can see is all the
+ *   route has; anything needing an operator privilege opens its own Gateway client
+ *   (the approval bridge in `scope.approvals`) instead of borrowing this one.
  * - Node's default 300s request timeout would sever an idle SSE stream, so the
  *   listener declares no request or socket deadline and the routes own their
  *   endings.

@@ -1,5 +1,6 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { ChannelGatewayContext } from "openclaw/plugin-sdk/channel-contract";
+import type { PageAssistApprovalGateway } from "../approval-gateway.js";
 import type { ResolvedPageAssistAccount } from "../types.js";
 import type { PageAssistStore } from "../store.js";
 
@@ -21,6 +22,14 @@ export type PageAssistScope = {
   resolveAgentName: () => string;
   /** Conversations and requests owned by this endpoint run; dies with the listener. */
   store: PageAssistStore;
+  /**
+   * The endpoint's view of the Gateway's pending approvals.
+   *
+   * A plugin HTTP route holds no operator scopes, so reads and decisions go through a
+   * client of our own rather than through the channel runtime. The bridge owns that
+   * connection's lifetime and is closed when the listener is retired.
+   */
+  approvals: PageAssistApprovalGateway;
   log?: PageAssistLog;
   /** Flipped on stop so in-flight drains report 503 instead of accepting new work. */
   isStopping: () => boolean;

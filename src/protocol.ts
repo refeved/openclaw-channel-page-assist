@@ -990,3 +990,123 @@ export function buildAssistantReplyBody(text: string, notices: readonly string[]
   const noticeText = notices.join("\n");
   return body ? `${body}\n${noticeText}` : noticeText;
 }
+
+/* ------------------------------------------------------------------ *
+ * Approvals                                                           *
+ * ------------------------------------------------------------------ */
+
+/**
+ * How wide an approval reaches. The browser sends back the id it read in a row, and the
+ * two values map onto the host's own decisions: `exact` is a one-off, `similar` keeps the
+ * pattern allowed. There is no third option, so a scope the endpoint cannot name is a
+ * client bug rather than a decision to interpret.
+ */
+export type ApprovalScopeId = "exact" | "similar";
+
+/**
+ * One answer button.
+ *
+ * Labels and descriptions are the QwenPaw channel's verbatim: the side panel renders
+ * "Approve — {label}", so a label stays short and names only the scope, while the
+ * description carries the caveat the user has to understand before clicking.
+ */
+export type ApprovalScopeOption = {
+  id: ApprovalScopeId;
+  label: string;
+  description: string;
+};
+
+export const APPROVAL_SCOPE_PRESENTATION: Record<ApprovalScopeId, ApprovalScopeOption> = {
+  exact: {
+    id: "exact",
+    label: "Exact target",
+    description:
+      "Run this tool call once with the target shown above. Native policy may remember the " +
+      "literal target, so this is not a one-off promise.",
+  },
+  similar: {
+    id: "similar",
+    label: "Similar pattern",
+    description: "Allow this and later calls matching the generalized target.",
+  },
+};
+
+/**
+ * One pending approval, projected for the browser.
+ *
+ * Field names and order follow the reference channel because the extension's validator
+ * requires every one of them, and because a decision is only accepted after the browser
+ * has re-read the row and compared it byte for byte with what it is answering.
+ */
+export type ApprovalDto = {
+  id: string;
+  conversationId: string;
+  agentId: string;
+  requestId: string;
+  tool: string;
+  target: string;
+  risk: string;
+  expiresAt: string;
+  actionable: boolean;
+  scopes: ApprovalScopeOption[];
+};
+
+export type ApprovalDecisionPayload = {
+  decisionId: string;
+  approved: boolean;
+  scope?: ApprovalScopeId;
+};
+
+/**
+ * The decision echo. `client.ts` refuses to clear a pending decision unless every field
+ * comes back identical to what it sent, so the response is built from the payload rather
+ * than from what the host happened to report.
+ */
+export type ApprovalDecisionDto = {
+  approvalId: string;
+  decisionId: string;
+  approved: boolean;
+  status: "confirmed";
+  scope?: ApprovalScopeId;
+};
+
+/** The reference channel's cap on one approval target row; the panel wraps, it does not scroll. */
+export const APPROVAL_TARGET_MAX_CHARS = 2000;
+
+/** How many confirmed decisions one endpoint run remembers, oldest dropped first. */
+export const APPROVAL_DECISIONS_MAX = 200;
+
+/**
+ * Whether a browser decision body asks for the same thing as one already confirmed.
+ *
+ * The stored payload is the whole comparison, so a retry with a fresh `decisionId` is a
+ * different decision and is refused rather than silently replacing the first answer.
+ */
+export function isSameApprovalDecision(
+  left: ApprovalDecisionPayload,
+  right: ApprovalDecisionPayload,
+): boolean {
+  return left.decisionId === right.decisionId && left.approved === right.approved && left.scope === right.scope;
+}
+
+/**
+ * Validates a decision body: `{decisionId: UUID, approved: bool, scope?: "exact"|"similar"}`.
+ *
+ * `scope` is only meaningful while approving, but the shape is not branched on `approved`:
+ * a denial that carries a scope is as much a client bug as an approval without one, and the
+ * reference channel rejects it the same way.
+ */
+export function parseApprovalDecisionPayload(value: unknown): ApprovalDecisionPayload {
+  const raw = asObject(value, "Approval decision");
+  rejectExtraKeys(raw, ["decisionId", "approved", "scope"]);
+
+  const scope = raw["scope"];
+  if (scope !== undefined && scope !== null && scope !== "exact" && scope !== "similar") {
+    fail("Unsupported approval scope");
+  }
+  return {
+    decisionId: requireUuid(readString(raw, "decisionId", true), "decisionId"),
+    approved: readBoolean(raw, "approved"),
+    ...(scope === "exact" || scope === "similar" ? { scope } : {}),
+  };
+}

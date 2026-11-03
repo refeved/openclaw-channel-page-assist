@@ -144,6 +144,10 @@ export async function runPageAssistRequest(
     });
     const sessionKey = route.sessionKey;
     conversation.sessionKey ??= sessionKey;
+    // The turn can raise an approval as soon as the agent makes its first tool call, and
+    // the host discards an approval that has no approval surface to route to. Waking our
+    // approval client now is what makes a poll-free browser still able to see the row.
+    scope.approvals.prefetch();
 
     const event: PageAssistInboundEvent = {
       record,

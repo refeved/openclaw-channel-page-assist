@@ -5,14 +5,15 @@ browser sidebar talk to one OpenClaw agent over a local, authenticated HTTP
 endpoint — the same wire contract the QwenPaw channel serves, so the extension
 needs no host-specific branch.
 
-**Status: bring-up (P2).** The plugin loads, the channel appears in
-`openclaw channels status`, and the chat loop is closed: creating a
-conversation, submitting a message, reading history, polling a request,
-streaming its events, uploading a file for the agent to read, and turning the
-agent's own reply files into browser-served downloads all reach a real agent
-run. In-browser approvals land in the following phase; until they do, the
-corresponding capability switches stay `false` so the browser disables those
-controls instead of hanging on a prompt that cannot arrive.
+**Status: bring-up (P3).** The plugin loads, the channel appears in
+`openclaw channels status`, and both halves of the loop are closed: creating a
+conversation, submitting a message, reading history, polling a request, streaming
+its events, uploading a file for the agent to read, and turning the agent's own
+reply files into browser-served downloads all reach a real agent run — and a
+command the host wants to gate now surfaces as an in-browser approval the user can
+allow or refuse. The endpoint advertises `approvals: true` with
+`approvalEvents: false`, so the browser drives those controls from its own poll
+rather than waiting on a push channel this plugin does not have.
 
 Everything above `Status` has been exercised against a real Gateway
 (OpenClaw 2026.10.9) with a stub OpenAI-compatible provider: plugin load,
@@ -22,10 +23,14 @@ that carries the page context into the model and settles `completed`, one agent
 session per browser conversation, an explicit channel stop that settles an
 in-flight request `cancelled` while its open stream still receives the terminal
 frame, an upload that the next message consumes exactly once, a reply that
-carries local files, a public URL and refused references in the same turn, and
-the ceiling sentences that a full composer or a crowded reply provokes, plus an
+carries local files, a public URL and refused references in the same turn, and the
+ceiling sentences that a full composer or a crowded reply provokes, plus an
 operator `mediaMaxMb` moving the advertised ceiling and the upload refusal
-together.
+together, an approval row that a browser saw without having polled yet, the
+`waiting_approval` state a pending row writes and the state its decision restores,
+the 400/404/409 replies that keep a wrong decision from looking like a confirmed
+one, an allowed decision whose command output came back in the reply, and a denied
+one whose refusal the reply repeats.
 
 ## What the endpoint is
 
@@ -123,6 +128,13 @@ reload until active Gateway work drains, so a running turn finishes before the
 restart lands. `channels.stop` is the path that retires the account under a
 running turn.
 
+The transcript is what the host hands the channel, nothing more. In the measured
+build a reply whose second line read like an internal tool marker (`toolResult=…`)
+arrived at the channel with that line already removed, while an ordinary trailing
+line in the same build reached the browser intact. The endpoint appends the text it
+is given and does not reassemble what the host filtered, so a missing marker line
+is a host decision, not a lost row here.
+
 ## Attachments and reply media
 
 Both directions ride one protected route, `GET /media/{id}`, so the browser keeps
@@ -175,6 +187,79 @@ one accepted, and a 1.5 MB reply file stopped by the host's own notice rather
 than ours. Our size sentence is the second line, not the first — what the check
 proves is that no path quotes a ceiling the operator did not set.
 
+## Approvals
+
+QwenPaw is asked; this endpoint has to go and look. The reference channel's agent
+loop calls into the channel when a command is gated, so its pending map is pushed
+to. OpenClaw keeps pending records inside the Gateway and tags them with a host
+session key instead of a browser conversation id, so `GET /approvals` lists the
+host's records and matches each record's session key against the conversations
+this endpoint started. Everything after that match is the reference contract: the
+same row fields, the same decision payload, the same sentences.
+
+**Ownership, no reviewer identity.** A record whose session key no conversation
+holds — another channel's approval, or an operator binding that lets two
+conversations share one session — is not shown at all, and a row is dropped rather
+than invented when its run has already finished, because the extension's validator
+rejects an empty `requestId`. `POST /approvals/:id/decision` re-reads the host
+record before applying anything, so a stale id, a foreign id, and a row the Control
+UI already answered all fail there instead of reaching the Gateway.
+
+**Pull only, on the browser's own cadence.** `approvals: true` with
+`approvalEvents: false` is the pair that makes the extension run its plain poll and
+skip the push loop; the extension re-reads the panel every 5 s while a run is
+alive, so a gate appears within one poll and no server-side event is needed. The
+poll is also the state sync: conversations holding a pending record move
+`running` → `waiting_approval` and the ones that stop holding one move back, which
+is why the sync runs even for records that produced no row.
+
+**A cold endpoint still catches the first gate.** The host expires an exec approval
+the instant it is raised if no approval surface is connected to route it to, and
+the bridge here connects lazily on the first read — so a browser that submits and
+never polls would lose the row. The turn therefore opens the connection before it
+dispatches, fire-and-forget: a failed preflight is not the run's problem, and the
+poll still answers 503 when the bridge cannot be built at all.
+
+**Scopes are re-derived, never trusted from the wire.** A decision outside a
+record's persisted allowed set is not rejected by the host — it is applied as a
+silent denial, which would report a user's approval as confirmed while their
+command never runs. So each row advertises the scopes computed the same way the
+Gateway computed them when it created the record (the exec policy knobs for a
+command, the plugin's own list for a plugin call, `deny` always available), and the
+decision endpoint refuses an unoffered scope with `This approval has no generalized
+scope` rather than forwarding a decision the host would invert. Measured on
+2026.10.9 with `tools.exec: { host: "gateway", mode: "ask" }`, a gated command
+offers exactly `exact`; a `similar` request against it is the 400.
+
+**What a row says.** `tool` is the fixed `exec` label for a command — an approval
+is about a command, not about a tool — and the plugin's own title otherwise.
+`target` is the host's sanitized command display text, the same string the Control
+UI shows, so the two surfaces cannot disagree about what was allowed. `risk` prefers
+the analyzer's warning prose, then its classified kinds, then a neutral sentence,
+because an empty risk line reads as "no risk". Text whose safety cannot be proven is
+suppressed instead of guessed: the host's sanitizer is not on the Plugin SDK, and
+its redact-then-escape order can only be reproduced here by comparing two views of
+the same string and withholding it when they disagree.
+
+**A decision is answered once and is replayable.** The first `POST` reaches the
+host and is remembered; replaying the identical payload returns the identical
+`200`, and a different decision for the same approval is 409 `A different decision
+was already confirmed`. A browser that lost the response cannot tell a denial from
+an approval that never arrived, so this is the difference it needs; the ledger is
+bounded and forgets the oldest.
+
+**A broken bridge is 503, never an empty list.** No config, no connection, a closed
+socket, a timeout — each becomes `Approval service unavailable; retry shortly`. An
+empty list asserts that nothing is blocked, and a read that failed is not entitled
+to that assertion.
+
+One host decision is worth stating because it shapes what a gate can even be: a
+command whose first token cannot be resolved to a real executable raises no approval
+at all and is refused outright (`SYSTEM_RUN_DENIED: approval requires a resolved
+executable`). On Windows a bare shell built-in is in that set, while
+`cmd /c echo …`, `findstr X notes.txt`, `whoami` and `node --version` were each
+measured as producing a row. The endpoint shows what the host chose to record.
+
 ## Endpoint coverage
 
 | Endpoint | State |
@@ -185,7 +270,7 @@ proves is that no path quotes a ceiling the operator did not set.
 | `GET /conversations/{id}/messages` | live |
 | `GET /requests/{id}`, `GET /requests/{id}/events` (SSE) | live |
 | `POST /attachments`, `GET /media/{id}` | live |
-| `GET /approvals`, `POST /approvals/{id}/decision` | pending (host approval registry + native resolve) |
+| `GET /approvals`, `POST /approvals/{id}/decision` | live |
 
 ## Development
 

@@ -1,5 +1,6 @@
 import type { PageAssistRoute } from "../scope.js";
 import { pageAssistAgentsRoute } from "./agents.js";
+import { pageAssistApprovalDecisionRoute, pageAssistApprovalsRoute } from "./approvals.js";
 import { pageAssistUploadAttachmentRoute } from "./attachments.js";
 import { pageAssistCapabilitiesRoute } from "./capabilities.js";
 import {
@@ -25,4 +26,6 @@ export const pageAssistRoutes: readonly PageAssistRoute[] = [
   pageAssistMediaRoute,
   pageAssistRequestRoute,
   pageAssistEventsRoute,
+  pageAssistApprovalsRoute,
+  pageAssistApprovalDecisionRoute,
 ];

@@ -14,6 +14,7 @@
 import { randomUUID } from "node:crypto";
 import { badRequest, conflict, forbidden, notFound, tooManyRequests } from "./http/respond.js";
 import {
+  APPROVAL_DECISIONS_MAX,
   MAX_CONVERSATIONS,
   MAX_OUTGOING_TOTAL_BYTES,
   MAX_PENDING_REQUESTS,
@@ -22,6 +23,8 @@ import {
   buildUserMessageAttachments,
   buildUserMessageText,
   type AttachmentKind,
+  type ApprovalDecisionDto,
+  type ApprovalDecisionPayload,
   type ConversationMessage,
   type MessageAttachment,
   type MessagePayload,
@@ -37,8 +40,9 @@ export type PageAssistConversation = {
   active?: string;
   /**
    * Host session this conversation maps to, recorded on the first request. Approval
-   * correlation (P3) starts from the host's pending record, which only carries a
-   * session key, so the reverse lookup has to exist by then.
+   * correlation starts from the host's pending record, which carries only a session key
+   * and an agent id — never a browser conversation id — so the reverse lookup has to
+   * exist before the first approval is raised.
    */
   sessionKey?: string;
 };
@@ -99,6 +103,18 @@ export type PageAssistUploadDescriptor = {
   bytes: number;
 };
 
+/**
+ * One confirmed decision, kept so a retry of the same answer is idempotent.
+ *
+ * Both halves are stored: the payload is what a later request is compared against, and
+ * the response is replayed verbatim because the extension will not clear a pending
+ * decision unless every field comes back exactly as it sent it.
+ */
+export type PageAssistApprovalDecision = {
+  payload: ApprovalDecisionPayload;
+  response: ApprovalDecisionDto;
+};
+
 /** Builds the fixed-order serialization used for replay comparison. */
 function canonicalize(payload: MessagePayload): string {
   return JSON.stringify({
@@ -134,6 +150,12 @@ export class PageAssistStore {
    */
   private readonly media = new Map<string, PageAssistMedia>();
   private mediaBytes = 0;
+  /**
+   * Confirmed approvals in decision order, oldest first. The key is the host's approval
+   * id, which is unique across kinds, so a replay can be matched without knowing which
+   * list the row came from.
+   */
+  private readonly decisions = new Map<string, PageAssistApprovalDecision>();
 
   /** Conversation count, exposed for tests and the limit's error path. */
   get conversationCount(): number {
@@ -154,6 +176,10 @@ export class PageAssistStore {
 
   get stagedMediaBytes(): number {
     return this.mediaBytes;
+  }
+
+  get confirmedDecisionCount(): number {
+    return this.decisions.size;
   }
 
   /**
@@ -421,6 +447,92 @@ export class PageAssistStore {
     record.settled = true;
     if (record.conversation.active === record.requestId) {
       record.conversation.active = undefined;
+    }
+  }
+
+  /* -------------------------------------------------------------- *
+   * Approvals                                                       *
+   * -------------------------------------------------------------- */
+
+  /**
+   * The conversation whose host session is `sessionKey`, or `undefined` when none is.
+   *
+   * A key that matches more than one conversation is answered as no match at all. Two
+   * conversations can only share a session through an operator binding, and in that case
+   * the endpoint cannot tell which browser is being asked to approve the command — showing
+   * the row twice would let either of them decide the other's run.
+   */
+  conversationForSessionKey(sessionKey: string): PageAssistConversation | undefined {
+    let found: PageAssistConversation | undefined;
+    for (const conversation of this.conversations.values()) {
+      if (conversation.sessionKey !== sessionKey) {
+        continue;
+      }
+      if (found !== undefined) {
+        return undefined;
+      }
+      found = conversation;
+    }
+    return found;
+  }
+
+  /** The decision already confirmed for one approval id, if this run has one. */
+  confirmedApprovalDecision(approvalId: string): PageAssistApprovalDecision | undefined {
+    return this.decisions.get(approvalId);
+  }
+
+  /**
+   * Records a confirmed decision, dropping the oldest past the ceiling.
+   *
+   * The cap exists so a long-lived endpoint cannot grow with every approval it has ever
+   * answered; past it, a retry is answered by the host instead of by the ledger, which is
+   * the same 409 a second browser tab already gets.
+   */
+  recordApprovalDecision(approvalId: string, decision: PageAssistApprovalDecision): void {
+    this.decisions.set(approvalId, decision);
+    while (this.decisions.size > APPROVAL_DECISIONS_MAX) {
+      const oldest = this.decisions.keys().next();
+      if (oldest.done === true) {
+        break;
+      }
+      this.decisions.delete(oldest.value);
+    }
+  }
+
+  /**
+   * Aligns request state with what the host currently has pending.
+   *
+   * Both directions run from the same read, so a state cannot be stuck: the host owns when
+   * an approval appears and disappears, and this endpoint only learns about it when it
+   * asks. Only `running` and `waiting_approval` are ever touched — a request that has not
+   * started, or one the host already finished, has nothing to wait on.
+   */
+  syncApprovalWaits(conversationIds: ReadonlySet<string>): void {
+    for (const record of this.requests.values()) {
+      if (record.state === "running" && conversationIds.has(record.conversation.id)) {
+        this.setState(record, "waiting_approval");
+      } else if (
+        record.state === "waiting_approval" &&
+        !conversationIds.has(record.conversation.id)
+      ) {
+        this.setState(record, "running");
+      }
+    }
+  }
+
+  /**
+   * Takes a conversation off its approval the moment the browser has answered it.
+   *
+   * Without this the panel would keep showing "waiting for approval" until the next poll,
+   * and the poll is a second behind the click for a reason the user did not choose.
+   */
+  resumeApprovalWait(conversation: PageAssistConversation): void {
+    if (!conversation.active) {
+      return;
+    }
+    const record = this.requests.get(conversation.active);
+    if (record?.state === "waiting_approval") {
+      this.setState(record, "running");
     }
   }
 

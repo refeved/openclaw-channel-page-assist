@@ -4,6 +4,7 @@ import type { ChannelGatewayContext } from "openclaw/plugin-sdk/channel-contract
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 import { channelReadyPatch, channelStoppedPatch } from "openclaw/plugin-sdk/gateway-runtime";
 import { normalizeOptionalString } from "openclaw/plugin-sdk/string-coerce-runtime";
+import { createPageAssistApprovalGateway } from "./approval-gateway.js";
 import { startPageAssistEndpoint } from "./http/server.js";
 import type { PageAssistScope } from "./http/scope.js";
 import { tryGetPageAssistRuntime } from "./runtime.js";
@@ -92,6 +93,16 @@ export async function startPageAssistGatewayAccount(ctx: PageAssistGatewayContex
   if (!runningEndpoints.has(accountId)) {
     let stopping = false;
     const store = new PageAssistStore();
+    // One bridge per endpoint run. It opens its connection on the first read rather than
+    // here, because a channel nobody polls must not hold a Gateway client, and it is
+    // retired with the listener below so a stopped port never keeps one alive.
+    const approvals = createPageAssistApprovalGateway({
+      // Shown where the host names the caller of a decision. This is a machine reading
+      // its own agent's queue on a browser's behalf, so it says exactly that.
+      clientDisplayName: `Page Assist browser channel (${accountId})`,
+      resolveConfig: currentPageAssistConfig,
+      debug: (message) => ctx.log?.info(`Page Assist approvals: ${message}`),
+    });
     const startupAgentName = resolvePageAssistAgentName(ctx.cfg, account.agentId);
     const scope: PageAssistScope = {
       account,
@@ -106,6 +117,7 @@ export async function startPageAssistGatewayAccount(ctx: PageAssistGatewayContex
       // Conversations live as long as the listener: the browser is told as much by
       // `recovery: false`, and a reload therefore starts a fresh instance id.
       store,
+      approvals,
       log: ctx.log,
       isStopping: () => stopping,
     };
@@ -144,6 +156,13 @@ export async function startPageAssistGatewayAccount(ctx: PageAssistGatewayContex
         // Anything still running has no listener left to answer it: cut the agent
         // run, mark the request cancelled, and let open event streams close.
         store.beginStop();
+        // The approval bridge goes the same way, and `close()` marks it dead before it
+        // waits, so a poll already in flight cannot reconnect a client whose port is gone.
+        approvals.close().catch((error: unknown) => {
+          ctx.log?.warn(
+            `Page Assist approval bridge did not close cleanly for ${accountId}: ${String(error)}`,
+          );
+        });
         notifyStopped?.();
       },
     });

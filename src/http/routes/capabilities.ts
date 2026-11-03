@@ -23,7 +23,9 @@ export const pageAssistCapabilitiesRoute: PageAssistRoute = {
       buildCapabilities({
         instanceId: scope.instanceId,
         principalScope: scope.principalScope,
-        approvals: false,
+        // Poll-only: the browser reads `/approvals` on its own cadence, and `approvalEvents`
+        // stays false because no SSE push for host approval changes is implemented here.
+        approvals: true,
         // Both flags belong to the same feature: the browser reads `attachments` for the
         // upload control and `media` for every byte fetch, including the upload it just
         // sent coming back from a restored history. One without the other is a composer
